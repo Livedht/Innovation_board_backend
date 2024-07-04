@@ -11,6 +11,7 @@ app = Flask(__name__)
 CORS(app)
 
 tasks = mock_tasks
+meetings = []
 current_year = datetime.now().year
 current_meeting = 1
 
@@ -73,8 +74,54 @@ def reorder_tasks():
     update_case_numbers()
     return jsonify(tasks)
 
-@app.route('/tasks/generate_report', methods=['GET'])
-def generate_report():
+@app.route('/meetings', methods=['GET'])
+def get_meetings():
+    return jsonify(meetings)
+
+@app.route('/meetings', methods=['POST'])
+def add_meeting():
+    new_meeting = request.json
+    new_meeting['id'] = max([meeting['id'] for meeting in meetings]) + 1 if meetings else 1
+    new_meeting['tasks'] = []
+    meetings.append(new_meeting)
+    return jsonify(new_meeting), 201
+
+@app.route('/meetings/<int:meeting_id>', methods=['PUT'])
+def update_meeting(meeting_id):
+    meeting = next((meeting for meeting in meetings if meeting['id'] == meeting_id), None)
+    if meeting is None:
+        return jsonify({'error': 'Meeting not found'}), 404
+
+    updated_data = request.json
+    meeting.update(updated_data)
+    return jsonify(meeting)
+
+@app.route('/meetings/<int:meeting_id>', methods=['DELETE'])
+def delete_meeting(meeting_id):
+    global meetings
+    meetings = [meeting for meeting in meetings if meeting['id'] != meeting_id]
+    return '', 204
+
+@app.route('/meetings/<int:meeting_id>/tasks', methods=['POST'])
+def add_task_to_meeting(meeting_id):
+    meeting = next((meeting for meeting in meetings if meeting['id'] == meeting_id), None)
+    if meeting is None:
+        return jsonify({'error': 'Meeting not found'}), 404
+
+    task_id = request.json['task_id']
+    task = next((task for task in tasks if task['id'] == task_id), None)
+    if task is None:
+        return jsonify({'error': 'Task not found'}), 404
+
+    meeting['tasks'].append(task)
+    return jsonify(meeting)
+
+@app.route('/meetings/<int:meeting_id>/generate_report', methods=['GET'])
+def generate_report(meeting_id):
+    meeting = next((meeting for meeting in meetings if meeting['id'] == meeting_id), None)
+    if meeting is None:
+        return jsonify({'error': 'Meeting not found'}), 404
+
     document = Document()
     
     sections = document.sections
@@ -90,7 +137,7 @@ def generate_report():
     title_run.bold = True
     title_run.font.size = Pt(14)
 
-    meeting_date = datetime.now().strftime("%d.%m.%Y")
+    meeting_date = meeting['date']
     details = [
         ("Place", "A4Y-117"),
         ("Date and time", meeting_date)
@@ -129,10 +176,10 @@ def generate_report():
     document.add_page_break()
 
     document.add_paragraph("Agenda", style='Heading 1')
-    for index, task in enumerate(tasks, start=1):
+    for index, task in enumerate(meeting['tasks'], start=1):
         document.add_paragraph(f"{task['caseNumber']} {task['title']} page {index}")
 
-    for task in tasks:
+    for task in meeting['tasks']:
         # Add a page break before each proposal
         document.add_page_break()
 
