@@ -74,16 +74,41 @@ def reorder_tasks():
 
 @app.route('/tasks/generate_report', methods=['GET'])
 def generate_report():
-    report = "Sakspapirer\n\n"
+    meeting_date = datetime.now().strftime("%d.%m.%Y")
+    report = f"Items list\nInnovation board – Executive\n\n"
+    report += f"Language\nNorwegian\n\n"
+    report += f"Place\nA4Y-117\n\n"
+    report += f"Date and time\n{meeting_date}\n\n"
+    
+    # Add members list (this should be dynamically generated based on actual members)
+    report += "Members Lars Olsen Dean Executive\n"
+    report += "Cecilie Asting Associate Dean Bachelor of Management\n"
+    report += "Geir Høidal Bjønnes Associate Dean Master of Management\n"
+    # ... Add other members
+
+    report += "\nProgramme Administration /\nSecretariat\n"
+    report += "Nora Iversen Røed Adviser\n"
+    report += "Haakon Tveter Senior Adviser\n\n"
+
+    report += "Ideas sent in though webform by idea owners:\n"
+    for index, task in enumerate(tasks, start=1):
+        report += f"{task['caseNumber']} {task['title']} page {index}\n"
+
+    report += "\nIdeas generated in workshop:\n"
+    # Add logic to differentiate between webform ideas and workshop ideas if necessary
+
     for task in tasks:
-        report += f"Sak {task['caseNumber']}: {task['title']}\n"
-        report += f"Idéeier: {task['owner']}\n"
-        report += f"Beskrivelse: {task['description']}\n"
-        report += f"Relevans for BI: {task['relevanceForBI']}\n"
-        report += f"Behov for kurset/idéen: {task['needForCourse']}\n"
-        report += f"Målgruppe: {task['targetGroup']}\n"
-        report += f"Vekstpotensial: {task['growthPotential']}\n"
-        report += f"Faglige ressurser: {task['facultyResources']}\n\n"
+        report += f"\nProposal – New course idea\n"
+        report += f"Item number:\n{task['caseNumber']}\n"
+        report += f"Idea title:\n{task['title']}\n"
+        report += f"Idea owner:\n{task['owner']}\n"
+        report += f"Briefly describe the idea:\n{task['description']}\n"
+        report += f"Why is this relevant for BI?\n{task.get('relevanceForBI', '')}\n"
+        report += f"Why does individuals and/or organizations need such a course/idea?\n{task.get('needForCourse', '')}\n"
+        report += f"What would be the relevant target group?\n{task.get('targetGroup', '')}\n"
+        report += f"What are your thoughts on the future growth potential of the market for this course/idea?\n{task.get('growthPotential', '')}\n"
+        report += f"Faculty resources – which academic departments should be involved?\n{task.get('facultyResources', '')}\n"
+
     return jsonify({"report": report})
 
 if __name__ == '__main__':
