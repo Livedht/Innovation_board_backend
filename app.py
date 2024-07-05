@@ -5,15 +5,25 @@ from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from io import BytesIO
-from mock_data import mock_tasks
+import requests
+import logging
+import os
 
 app = Flask(__name__)
 CORS(app)
 
-tasks = mock_tasks
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+
+tasks = []
 meetings = []
 current_year = datetime.now().year
 current_meeting = 1
+
+NETTSKJEMA_API_URL = "https://nettskjema.no/api/v2"
+NETTSKJEMA_TOKEN = "vd3vtss32mf08me2vh584q6nb2i2b8t0icoao4dablv0b4r8crji5o5lrgl5ii4q5hhanmbpan4phdf03biglqglvtj9igsa609oc7mut4n7etk210e3hra1rb8segs6mq6q"
+NETTSKJEMA_FORM_ID = "397131"
+
 
 def update_case_numbers():
     global tasks
@@ -36,6 +46,14 @@ def add_task():
     tasks.append(new_task)
     update_case_numbers()
     return jsonify(new_task), 201
+
+# Modify this function to accept a task as an argument
+def add_task_internal(task):
+    task['id'] = max([t['id'] for t in tasks]) + 1 if tasks else 1
+    task['stage'] = "Idea Description"  # Set default stage
+    tasks.append(task)
+    update_case_numbers()
+    return task
 
 @app.route('/tasks/<int:task_id>', methods=['PUT'])
 def update_task(task_id):
@@ -172,7 +190,6 @@ def generate_report(meeting_id):
     for name, title in secretariat:
         document.add_paragraph(f"{name} {title}")
 
-    # Add a page break before the agenda
     document.add_page_break()
 
     document.add_paragraph("Agenda", style='Heading 1')
@@ -180,12 +197,10 @@ def generate_report(meeting_id):
         document.add_paragraph(f"{task['caseNumber']} {task['title']} page {index}")
 
     for task in meeting['tasks']:
-        # Add a page break before each proposal
         document.add_page_break()
 
         document.add_paragraph("Proposal – New course idea", style='Heading 2')
         
-        # Make headings bold and add content
         headings = [
             ("Item number", task['caseNumber']),
             ("Idea title", task['title']),
@@ -207,6 +222,81 @@ def generate_report(meeting_id):
     f.seek(0)
 
     return send_file(f, as_attachment=True, download_name='innovation_board_sakspapirer.docx', mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+def get_nettskjema_data(form_id):
+    headers = {
+        "Authorization": f"Bearer {NETTSKJEMA_TOKEN}"
+    }
+    response = requests.get(f"{NETTSKJEMA_API_URL}/forms/{form_id}/submissions", headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+def transform_submission_to_task(submission):
+    logging.debug(f"Submission structure: {submission}")
+    
+    answers = {}
+    for answer in submission.get('answers', []):
+        question_id = str(answer.get('questionId'))
+        answer_value = answer.get('textAnswer', '')
+        answers[question_id] = answer_value
+    
+    return {
+        "submissionId": submission.get('submissionId'),  # Unique identifier
+        "title": answers.get('7168624', f"Submission {submission.get('submissionId', 'Unknown')}"),
+        "owner": answers.get('6795267', submission.get('respondentEmail', 'Unknown')),
+        "description": answers.get('6795369', f"Imported from Nettskjema submission {submission.get('submissionId', 'Unknown')}"),
+        "relevanceForBI": answers.get('6795370', ''),
+        "needForCourse": answers.get('6795371', ''),
+        "targetGroup": answers.get('6795373', ''),
+        "growthPotential": answers.get('6826847', ''),
+        "facultyResources": answers.get('6795374', ''),
+        "stage": "Idea Description",
+    }
+
+@app.route('/meetings/<int:meeting_id>/tasks/<int:task_id>', methods=['DELETE'])
+def remove_task_from_meeting(meeting_id, task_id):
+    meeting = next((meeting for meeting in meetings if meeting['id'] == meeting_id), None)
+    if meeting is None:
+        return jsonify({'error': 'Meeting not found'}), 404
+
+    meeting['tasks'] = [task for task in meeting['tasks'] if task['id'] != task_id]
+    return jsonify(meeting)
+
+
+
+@app.route('/import-nettskjema', methods=['POST'])
+def import_nettskjema():
+    try:
+        logging.info("Starting Nettskjema import process")
+        submissions = get_nettskjema_data(NETTSKJEMA_FORM_ID)
+        imported_tasks = []
+
+        existing_submission_ids = {task.get('submissionId') for task in tasks}
+
+        for submission in submissions:
+            if submission.get('submissionId') in existing_submission_ids:
+                logging.info(f"Skipping already existing submission with ID: {submission.get('submissionId')}")
+                continue
+            
+            try:
+                task = transform_submission_to_task(submission)
+                new_task = add_task_internal(task)  # Use the new internal function
+                imported_tasks.append(new_task)
+            except Exception as e:
+                logging.error(f"Error processing submission: {str(e)}")
+                continue
+
+        logging.info(f"Successfully imported {len(imported_tasks)} tasks")
+        return jsonify({
+            "message": f"Successfully imported {len(imported_tasks)} tasks",
+            "imported_tasks": imported_tasks
+        }), 200
+    except requests.RequestException as e:
+        logging.error(f"Error fetching data from Nettskjema: {str(e)}")
+        return jsonify({"error": f"Error fetching data from Nettskjema: {str(e)}"}), 500
+    except Exception as e:
+        logging.error(f"Error processing import: {str(e)}")
+        return jsonify({"error": f"Error processing import: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
