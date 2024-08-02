@@ -18,7 +18,7 @@ import postgrest.exceptions
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -37,6 +37,12 @@ NETTSKJEMA_FORM_ID = os.environ.get("NETTSKJEMA_FORM_ID")
 
 current_year = datetime.now().year
 current_meeting = 1
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
 
 def roman_numeral(num):
     roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X']
@@ -138,8 +144,25 @@ def add_task():
 @app.route('/tasks/<int:task_id>', methods=['PUT'])
 def update_task(task_id):
     updated_data = request.json
-    response = supabase.table('tasks').update(updated_data).eq('id', task_id).execute()
-    return jsonify(response.data[0])
+    try:
+        # Get the current task data
+        current_task = supabase.table('tasks').select('*').eq('id', task_id).execute()
+        if not current_task.data:
+            return jsonify({'error': 'Task not found'}), 404
+        
+        # Merge the updated data with the current task data
+        task_data = current_task.data[0]
+        task_data.update(updated_data)
+        
+        # Update the task
+        response = supabase.table('tasks').update(task_data).eq('id', task_id).execute()
+        if response.data:
+            return jsonify(response.data[0]), 200
+        else:
+            return jsonify({'error': 'Failed to update task'}), 500
+    except Exception as e:
+        print(f"Error updating task: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/tasks/<int:task_id>', methods=['DELETE'])
 def delete_task(task_id):
@@ -169,73 +192,54 @@ def reorder_tasks():
 
 @app.route('/meetings', methods=['GET'])
 def get_meetings():
-    response = supabase.table('meetings').select('*').execute()
-    return jsonify(response.data)
+    response = supabase.table('meetings').select('*, tasks(*)').execute()
+    meetings = response.data
+    for meeting in meetings:
+        meeting['tasks'] = meeting.get('tasks', [])
+    return jsonify(meetings), 200
 
 @app.route('/meetings', methods=['POST'])
 def add_meeting():
     new_meeting = request.json
+    print("Received meeting data:", new_meeting)
 
-    # Ensure only the columns that exist in your database are included
     meeting_data = {
         'number': new_meeting.get('number'),
-        'date': new_meeting.get('date')
+        'date': new_meeting.get('date'),
+        'location': new_meeting.get('location')
     }
 
-    # Validate required fields
     if not meeting_data['number'] or not meeting_data['date']:
         return jsonify({'error': 'Meeting number and date are required'}), 400
 
-    # Convert date string to timestamp with timezone if it's not already
     if isinstance(meeting_data['date'], str):
         try:
-            meeting_data['date'] = datetime.fromisoformat(meeting_data['date']).replace(tzinfo=timezone.utc)
+            # Parse the date string to a datetime object
+            date_obj = datetime.fromisoformat(meeting_data['date'].replace('Z', '+00:00'))
+            # Convert the datetime object back to an ISO 8601 string
+            meeting_data['date'] = date_obj.isoformat()
         except ValueError:
             return jsonify({'error': 'Invalid date format. Please use ISO format (YYYY-MM-DDTHH:MM:SS.sssZ)'}), 400
 
-    # Convert datetime object to ISO format string
-    if isinstance(meeting_data['date'], datetime):
-        meeting_data['date'] = meeting_data['date'].isoformat()
-
     try:
+        print("Inserting meeting data:", meeting_data)
         response = supabase.table('meetings').insert(meeting_data).execute()
+        print("Supabase response:", response)
         if response.data:
-            new_meeting_id = response.data[0]['id']
-            return jsonify({'id': new_meeting_id, **meeting_data}), 201
+            new_meeting = response.data[0]
+            return_data = {
+                'id': new_meeting['id'],
+                'number': new_meeting['number'],
+                'date': new_meeting['date'],
+                'location': new_meeting['location']
+            }
+            return jsonify(return_data), 201
         else:
             return jsonify({'error': 'Failed to create meeting'}), 500
-    except postgrest.exceptions.APIError as e:
+    except Exception as e:
+        print("Error:", str(e))
         return jsonify({'error': str(e)}), 400
-
-    new_meeting = request.json
     
-    # Ensure only the columns that exist in your database are included
-    meeting_data = {
-        'number': new_meeting.get('number'),
-        'date': new_meeting.get('date')
-    }
-    
-    # Validate required fields
-    if not meeting_data['number'] or not meeting_data['date']:
-        return jsonify({'error': 'Meeting number and date are required'}), 400
-    
-    # Convert date string to timestamp with timezone if it's not already
-    if isinstance(meeting_data['date'], str):
-        try:
-            meeting_data['date'] = datetime.fromisoformat(meeting_data['date']).replace(tzinfo=timezone.utc)
-        except ValueError:
-            return jsonify({'error': 'Invalid date format. Please use ISO format (YYYY-MM-DDTHH:MM:SS.sssZ)'}), 400
-    
-    try:
-        response = supabase.table('meetings').insert(meeting_data).execute()
-        if response.data:
-            new_meeting_id = response.data[0]['id']
-            return jsonify({'id': new_meeting_id, **meeting_data}), 201
-        else:
-            return jsonify({'error': 'Failed to create meeting'}), 500
-    except postgrest.exceptions.APIError as e:
-        return jsonify({'error': str(e)}), 400
-
 @app.route('/meetings/<int:meeting_id>', methods=['PUT'])
 def update_meeting(meeting_id):
     updated_data = request.json
