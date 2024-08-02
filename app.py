@@ -14,6 +14,7 @@ from requests_oauthlib import OAuth2Session
 from dotenv import load_dotenv
 import json
 import postgrest.exceptions
+import uuid
 
 load_dotenv()
 
@@ -63,69 +64,66 @@ def get_nettskjema_data(form_id):
     response = oauth.get(f"{NETTSKJEMA_API_URL}/form/{form_id}/answers")
     response.raise_for_status()
     
-    # Log the raw response for debugging
-    logging.debug(f"Raw response from Nettskjema: {response.text}")
-    
-    # Parse the response line by line
-    data = []
+    submissions = {}
     for line in response.iter_lines():
         if line:
             try:
-                json_obj = json.loads(line.decode('utf-8'))
-                data.append(json_obj)
+                answer = json.loads(line.decode('utf-8'))
+                submission_id = answer['submissionId']
+                if submission_id not in submissions:
+                    submissions[submission_id] = []
+                submissions[submission_id].append(answer)
             except json.JSONDecodeError as e:
                 logging.error(f"Error decoding JSON line: {e}")
                 logging.error(f"Problematic line: {line}")
     
-    return data
+    return list(submissions.values())
+
+
+import os
+import uuid
 
 def transform_submission_to_task(submission):
-    logging.debug(f"Processing submission: {submission}")
+    task = {
+        "submission_id": submission[0]['submissionId'],
+        "title": "",
+        "owner": "",
+        "description": "",
+        "relevance_for_bi": "",
+        "need_for_course": "",
+        "target_group": "",
+        "growth_potential": "",
+        "faculty_resources": "",
+        "stage": "Idea Description",
+        "attachment_url": None
+    }
     
-    submissions_dict = {}
     for answer in submission:
-        submissionId = answer['submissionId']
-        if submissionId not in submissions_dict:
-            submissions_dict[submissionId] = []
-        submissions_dict[submissionId].append(answer)
+        element_id = str(answer.get('elementId'))
+        if element_id == '6461993':  # Title
+            task['title'] = answer.get('textAnswer', '')
+        elif element_id == '6130890':  # Owner
+            task['owner'] = answer.get('textAnswer', '')
+        elif element_id == '6130957':  # Description
+            task['description'] = answer.get('textAnswer', '')
+        elif element_id == '6130958':  # Relevance for BI
+            task['relevance_for_bi'] = answer.get('textAnswer', '')
+        elif element_id == '6130959':  # Need for course
+            task['need_for_course'] = answer.get('textAnswer', '')
+        elif element_id == '6130961':  # Target group
+            task['target_group'] = answer.get('textAnswer', '')
+        elif element_id == '6158929':  # Growth potential
+            task['growth_potential'] = answer.get('textAnswer', '')
+        elif element_id == '6130962':  # Faculty resources
+            task['faculty_resources'] = answer.get('textAnswer', '')
+        elif element_id == '6130963':  # Optional attachment
+            attachment_id = answer.get('answerAttachmentId')
+            if attachment_id:
+                task['attachment_url'] = f"https://api.nettskjema.no/v3/attachment/{attachment_id}"
     
-    tasks = []
-    for submissionId, answers in submissions_dict.items():
-        task = {
-            "submission_id": submissionId,
-            "title": "",
-            "owner": "",
-            "description": "",
-            "relevance_for_bi": "",
-            "need_for_course": "",
-            "target_group": "",
-            "growth_potential": "",
-            "faculty_resources": "",
-            "stage": "Idea Description",
-        }
-        
-        for answer in answers:
-            elementId = str(answer['elementId'])
-            if elementId == '6461993':  # Title
-                task['title'] = answer.get('textAnswer', '')
-            elif elementId == '6130890':  # Owner
-                task['owner'] = answer.get('textAnswer', '')
-            elif elementId == '6130957':  # Description
-                task['description'] = answer.get('textAnswer', '')
-            elif elementId == '6130958':  # Relevance for BI
-                task['relevance_for_bi'] = answer.get('textAnswer', '')
-            elif elementId == '6130959':  # Need for course
-                task['need_for_course'] = answer.get('textAnswer', '')
-            elif elementId == '6130961':  # Target group
-                task['target_group'] = answer.get('textAnswer', '')
-            elif elementId == '6158929':  # Growth potential
-                task['growth_potential'] = answer.get('textAnswer', '')
-            elif elementId == '6130962':  # Faculty resources
-                task['faculty_resources'] = answer.get('textAnswer', '')
-        
-        tasks.append(task)
-    
-    return tasks
+    return task
+
+
 
 @app.route('/tasks', methods=['GET'])
 def get_tasks():
@@ -406,6 +404,7 @@ def generate_minutes(meeting_id):
 
 @app.route('/import-nettskjema', methods=['POST'])
 def import_nettskjema():
+    imported_tasks = []
     try:
         logging.info("Starting Nettskjema import process")
         submissions = get_nettskjema_data(NETTSKJEMA_FORM_ID)
@@ -415,30 +414,44 @@ def import_nettskjema():
             logging.warning("No submissions received from Nettskjema")
             return jsonify({"message": "No submissions to import"}), 200
 
-        imported_tasks = []
-        existing_submission_ids = set(supabase.table('tasks').select('submission_id').execute().data)
+        existing_submission_ids = set(task['submission_id'] for task in supabase.table('tasks').select('submission_id').execute().data)
 
         for submission in submissions:
-            logging.debug(f"Processing submission: {submission}")
-            if not isinstance(submission, list) or not submission:
-                logging.warning(f"Invalid submission format: {submission}")
+            logging.info(f"Processing submission: {submission}")
+            task = transform_submission_to_task(submission)
+            logging.info(f"Transformed task: {task}")
+
+            if task['submission_id'] in existing_submission_ids:
+                logging.info(f"Skipping duplicate submission: {task['submission_id']}")
                 continue
 
-            submission_id = submission[0].get('submissionId')
-            if submission_id in existing_submission_ids:
-                logging.info(f"Skipping already existing submission with ID: {submission_id}")
-                continue
-            
+            # Handle attachment upload
+            if task['attachment_url']:
+                try:
+                    response = requests.get(task['attachment_url'])
+                    response.raise_for_status()
+                    file_content = BytesIO(response.content)
+                    file_name = f"{uuid.uuid4()}{os.path.splitext(response.headers.get('Content-Disposition', ''))[1]}"
+                    
+                    # Upload to Supabase Storage
+                    upload_response = supabase.storage.from_('task-attachments').upload(file_name, file_content)
+                    
+                    # Get public URL
+                    public_url = supabase.storage.from_('task-attachments').get_public_url(file_name)
+                    
+                    task['attachment_url'] = public_url
+                except Exception as e:
+                    logging.error(f"Error uploading attachment: {str(e)}")
+                    task['attachment_url'] = None
+
             try:
-                task = transform_submission_to_task(submission)
-                logging.debug(f"Transformed task: {task}")
                 response = supabase.table('tasks').insert(task).execute()
                 if response.data:
-                    imported_tasks.append(response.data[0])
+                    imported_tasks.extend(response.data)
+                    logging.info(f"Successfully imported task: {task['title']}")
+                    logging.info(f"Imported task data: {response.data[0]}")
                 else:
                     logging.warning(f"No data returned when inserting task: {task}")
-            except postgrest.exceptions.APIError as e:
-                logging.error(f"Error inserting task into Supabase: {str(e)}")
             except Exception as e:
                 logging.error(f"Error processing submission: {str(e)}", exc_info=True)
 
@@ -453,28 +466,6 @@ def import_nettskjema():
     except Exception as e:
         logging.error(f"Error processing import: {str(e)}", exc_info=True)
         return jsonify({"error": f"Error processing import: {str(e)}"}), 500
-
-@app.route('/form/<int:form_id>/settings', methods=['GET'])
-def get_form_settings(form_id):
-    response = supabase.table('forms').select('*').eq('id', form_id).execute()
-    if not response.data:
-        return jsonify({'error': 'Form not found'}), 404
-    return jsonify(response.data[0])
-
-@app.route('/form/<int:form_id>/settings', methods=['PATCH'])
-def patch_form_settings(form_id):
-    updated_data = request.json
-    force_cleanup = request.args.get('forceCleanup', 'false').lower() == 'true'
-    
-    response = supabase.table('forms').update(updated_data).eq('id', form_id).execute()
-    if not response.data:
-        return jsonify({'error': 'Form not found'}), 404
-    
-    if force_cleanup:
-        # Implement cleanup logic here if needed
-        pass
-    
-    return jsonify(response.data[0])
 
 @app.route('/me', methods=['GET'])
 def get_environment():
