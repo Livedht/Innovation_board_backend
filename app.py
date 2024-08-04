@@ -80,10 +80,19 @@ def get_nettskjema_data(form_id):
     return list(submissions.values())
 
 
-import os
-import uuid
+def get_form_elements(form_id):
+    oauth = get_oauth_session()
+    response = oauth.get(f"{NETTSKJEMA_API_URL}/form/{form_id}/elements")
+    response.raise_for_status()
+    elements = response.json()
+    
+    # Create a mapping of element texts to their IDs
+    element_mapping = {element['text']: element['elementId'] for element in elements}
+    logging.info(f"Element mapping: {json.dumps(element_mapping, indent=2)}")
+    
+    return elements
 
-def transform_submission_to_task(submission):
+def transform_submission_to_task(submission, element_mapping):
     task = {
         "submission_id": submission[0]['submissionId'],
         "title": "",
@@ -100,26 +109,24 @@ def transform_submission_to_task(submission):
     
     for answer in submission:
         element_id = str(answer.get('elementId'))
-        if element_id == '6461993':  # Title
+        if element_id == str(element_mapping.get('Idea title')):
             task['title'] = answer.get('textAnswer', '')
-        elif element_id == '6130890':  # Owner
+        elif element_id == str(element_mapping.get('Idea Owner')):
             task['owner'] = answer.get('textAnswer', '')
-        elif element_id == '6130957':  # Description
+        elif element_id == str(element_mapping.get('Briefly describe the idea:')):
             task['description'] = answer.get('textAnswer', '')
-        elif element_id == '6130958':  # Relevance for BI
+        elif element_id == str(element_mapping.get('Why is this relevant for BI?')):
             task['relevance_for_bi'] = answer.get('textAnswer', '')
-        elif element_id == '6130959':  # Need for course
+        elif element_id == str(element_mapping.get('Why does individuals and/or organizations need such a course/idea?')):
             task['need_for_course'] = answer.get('textAnswer', '')
-        elif element_id == '6130961':  # Target group
+        elif element_id == str(element_mapping.get('What would be the relevant target group?')):
             task['target_group'] = answer.get('textAnswer', '')
-        elif element_id == '6158929':  # Growth potential
+        elif element_id == str(element_mapping.get('What are your thoughts on the future growth potential of the market for this course/idea?')):
             task['growth_potential'] = answer.get('textAnswer', '')
-        elif element_id == '6130962':  # Faculty resources
+        elif element_id == str(element_mapping.get('Faculty resources – which academic departments should be involved?')):
             task['faculty_resources'] = answer.get('textAnswer', '')
-        elif element_id == '6130963':  # Optional attachment
-            attachment_id = answer.get('answerAttachmentId')
-            if attachment_id:
-                task['attachment_url'] = f"https://api.nettskjema.no/v3/attachment/{attachment_id}"
+        elif answer.get('answerAttachmentId'):
+            task['attachment_url'] = f"https://api.nettskjema.no/v3/attachment/{answer.get('answerAttachmentId')}"
     
     return task
 
@@ -407,6 +414,11 @@ def import_nettskjema():
     imported_tasks = []
     try:
         logging.info("Starting Nettskjema import process")
+        
+        # Get form elements
+        form_elements = get_form_elements(NETTSKJEMA_FORM_ID)
+        logging.info(f"Form elements: {json.dumps(form_elements, indent=2)}")
+        
         submissions = get_nettskjema_data(NETTSKJEMA_FORM_ID)
         logging.info(f"Received {len(submissions)} submissions from Nettskjema")
         
@@ -416,10 +428,18 @@ def import_nettskjema():
 
         existing_submission_ids = set(task['submission_id'] for task in supabase.table('tasks').select('submission_id').execute().data)
 
+        form_elements = get_form_elements(NETTSKJEMA_FORM_ID)
+        element_mapping = {element['text']: element['elementId'] for element in form_elements}
+        logging.info(f"Element mapping: {json.dumps(element_mapping, indent=2)}")
+
         for submission in submissions:
-            logging.info(f"Processing submission: {submission}")
-            task = transform_submission_to_task(submission)
-            logging.info(f"Transformed task: {task}")
+            logging.info(f"Processing submission: {submission[0]['submissionId']}")
+            task = transform_submission_to_task(submission, element_mapping)
+            logging.info(f"Transformed task: {json.dumps(task, indent=2)}")
+
+            # Log each field separately
+            for key, value in task.items():
+                logging.info(f"{key}: {value}")
 
             if task['submission_id'] in existing_submission_ids:
                 logging.info(f"Skipping duplicate submission: {task['submission_id']}")
@@ -440,6 +460,7 @@ def import_nettskjema():
                     public_url = supabase.storage.from_('task-attachments').get_public_url(file_name)
                     
                     task['attachment_url'] = public_url
+                    logging.info(f"Uploaded attachment: {public_url}")
                 except Exception as e:
                     logging.error(f"Error uploading attachment: {str(e)}")
                     task['attachment_url'] = None
@@ -449,11 +470,11 @@ def import_nettskjema():
                 if response.data:
                     imported_tasks.extend(response.data)
                     logging.info(f"Successfully imported task: {task['title']}")
-                    logging.info(f"Imported task data: {response.data[0]}")
+                    logging.info(f"Imported task data: {json.dumps(response.data[0], indent=2)}")
                 else:
                     logging.warning(f"No data returned when inserting task: {task}")
             except Exception as e:
-                logging.error(f"Error processing submission: {str(e)}", exc_info=True)
+                logging.error(f"Error inserting task into database: {str(e)}", exc_info=True)
 
         logging.info(f"Successfully imported {len(imported_tasks)} tasks")
         return jsonify({
