@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import json
 import postgrest.exceptions
 import uuid
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
@@ -143,6 +144,8 @@ def get_tasks():
 @app.route('/tasks', methods=['POST'])
 def add_task():
     new_task = request.json
+    if 'id' in new_task:
+        del new_task['id']  # Remove the id if it's present
     response = supabase.table('tasks').insert(new_task).execute()
     return jsonify(response.data[0]), 201
 
@@ -370,6 +373,54 @@ def generate_report(meeting_id):
     f.seek(0)
 
     return send_file(f, as_attachment=True, download_name='innovation_board_sakspapirer.docx', mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+@app.route('/tasks/<int:task_id>/upload', methods=['POST'])
+def upload_file(task_id):
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    if file:
+        original_filename = file.filename
+        filename = secure_filename(original_filename)
+        file_extension = os.path.splitext(filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        try:
+            # Upload to Supabase Storage
+            file_content = file.read()
+            upload_response = supabase.storage.from_('task-attachments').upload(unique_filename, file_content)
+            
+            # Get public URL
+            public_url = supabase.storage.from_('task-attachments').get_public_url(unique_filename)
+            
+            # Create attachment object
+            new_attachment = {
+                'url': public_url,
+                'filename': original_filename
+            }
+            
+            # Fetch current task data
+            task_response = supabase.table('tasks').select('attachments').eq('id', task_id).execute()
+            if task_response.data:
+                current_attachments = task_response.data[0].get('attachments', []) or []
+            else:
+                current_attachments = []
+            
+            # Append new attachment
+            updated_attachments = current_attachments + [new_attachment]
+            
+            # Update task with new attachments
+            update_response = supabase.table('tasks').update({'attachments': updated_attachments}).eq('id', task_id).execute()
+            
+            return jsonify({
+                'message': 'File uploaded successfully',
+                'attachment': new_attachment
+            }), 200
+        except Exception as e:
+            logging.error(f"Error uploading file: {str(e)}")
+            return jsonify({'error': f'Error uploading file: {str(e)}'}), 500
 
 @app.route('/meetings/<int:meeting_id>/generate_minutes', methods=['GET'])
 def generate_minutes(meeting_id):
