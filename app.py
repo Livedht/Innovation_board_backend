@@ -16,6 +16,7 @@ import json
 import postgrest.exceptions
 import uuid
 from werkzeug.utils import secure_filename
+from enum import Enum
 
 load_dotenv()
 
@@ -36,6 +37,12 @@ NETTSKJEMA_AUTH_URL = "https://authorization.nettskjema.no/oauth2/token"
 NETTSKJEMA_CLIENT_ID = os.environ.get("NETTSKJEMA_CLIENT_ID")
 NETTSKJEMA_CLIENT_SECRET = os.environ.get("NETTSKJEMA_CLIENT_SECRET")
 NETTSKJEMA_FORM_ID = os.environ.get("NETTSKJEMA_FORM_ID")
+
+class CompletionStatus(Enum):
+    IN_PROGRESS = 'In Progress'
+    COMPLETED_APPROVED = 'Completed and Approved'
+    STOPPED = 'Stopped'
+    NOT_APPROVED = 'Not Approved'
 
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, o):
@@ -97,6 +104,7 @@ def transform_submission_to_task(submission, element_mapping):
         "growth_potential": "",
         "faculty_resources": "",
         "stage": "Idea Description",
+        "completion_status": CompletionStatus.IN_PROGRESS.value,
         "attachment_url": None
     }
     
@@ -134,6 +142,7 @@ def add_task():
     new_task = request.json
     if 'id' in new_task:
         del new_task['id']  # Remove the id if it's present
+    new_task['completion_status'] = CompletionStatus.IN_PROGRESS.value
     response = supabase.table('tasks').insert(new_task).execute()
     return jsonify(response.data[0]), 201
 
@@ -149,6 +158,10 @@ def update_task(task_id):
         # Merge the updated data with the current task data
         task_data = current_task.data[0]
         task_data.update(updated_data)
+        
+        # If the stage is being updated to 'Completed', update completion_status
+        if 'stage' in updated_data and updated_data['stage'] == 'Completed':
+            task_data['completion_status'] = CompletionStatus.COMPLETED_APPROVED.value
         
         # Update the task
         response = supabase.table('tasks').update(task_data).eq('id', task_id).execute()
@@ -389,7 +402,9 @@ def generate_report(meeting_id):
             ("Item number", task['tasks']['casenumber']),
             ("Idea title", task['tasks']['title']),
             ("Idea owner", task['tasks']['owner']),
-            ("Stage at meeting", task['stage_at_meeting']),  # Add this line
+            ("Stage at meeting", task['stage_at_meeting']),
+            ("Current stage", task['tasks']['stage']),
+            ("Completion status", task['tasks']['completion_status']),
             ("Briefly describe the idea", task['tasks']['description']),
             ("Why is this relevant for BI?", task['tasks'].get('relevance_for_bi', '')),
             ("Why does individuals and/or organizations need such a course/idea?", task['tasks'].get('need_for_course', '')),
@@ -482,6 +497,8 @@ def generate_minutes(meeting_id):
         item_title.runs[0].bold = True
         
         document.add_paragraph(f"Stage at meeting: {task['stage_at_meeting']}")
+        document.add_paragraph(f"Current stage: {task['tasks']['stage']}")
+        document.add_paragraph(f"Completion status: {task['tasks']['completion_status']}")
         
         if task['minutes']:
             document.add_paragraph(task['minutes'])
@@ -603,6 +620,22 @@ def get_task_meeting_history(task_id):
         return jsonify(meeting_history), 200
     except Exception as e:
         print(f"Error fetching meeting history: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/tasks/<int:task_id>/status', methods=['PUT'])
+def update_task_status(task_id):
+    new_status = request.json.get('status')
+    if new_status not in [status.value for status in CompletionStatus]:
+        return jsonify({'error': 'Invalid status'}), 400
+    
+    try:
+        response = supabase.table('tasks').update({'completion_status': new_status}).eq('id', task_id).execute()
+        if response.data:
+            return jsonify(response.data[0]), 200
+        else:
+            return jsonify({'error': 'Failed to update task status'}), 500
+    except Exception as e:
+        print(f"Error updating task status: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.errorhandler(404)
