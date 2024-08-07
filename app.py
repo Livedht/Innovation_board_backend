@@ -167,13 +167,23 @@ def delete_task(task_id):
 
 @app.route('/meetings', methods=['GET'])
 def get_meetings():
-    response = supabase.table('meetings').select('*, meeting_tasks(task_id, tasks(*))').execute()
+    response = supabase.table('meetings').select('*').execute()
     meetings = response.data
+    
     for meeting in meetings:
-        meeting['tasks'] = [item['tasks'] for item in meeting.get('meeting_tasks', [])]
-        del meeting['meeting_tasks']
+        # Fetch tasks for this meeting, including the stage_at_meeting
+        tasks_response = supabase.table('meeting_tasks')\
+            .select('task_id, stage_at_meeting, tasks(*)')\
+            .eq('meeting_id', meeting['id'])\
+            .execute()
+        
+        meeting['tasks'] = []
+        for item in tasks_response.data:
+            task = item['tasks']
+            task['stage_at_meeting'] = item['stage_at_meeting']
+            meeting['tasks'].append(task)
+    
     return jsonify(meetings), 200
-
 
 @app.route('/meetings', methods=['POST'])
 def add_meeting():
@@ -250,18 +260,18 @@ def add_task_to_meeting(meeting_id):
         current_tasks_response = supabase.table('meeting_tasks').select('task_id').eq('meeting_id', meeting_id).execute()
         new_order = len(current_tasks_response.data) + 1
         
-        # Add the task to the meeting
+        # Add the task to the meeting, including the current stage
         meeting_task_data = {
             'meeting_id': meeting_id,
             'task_id': task_id,
-            'task_order': new_order
+            'task_order': new_order,
+            'stage_at_meeting': task['stage']  # Store the current stage of the task
         }
         supabase.table('meeting_tasks').insert(meeting_task_data).execute()
         
-        return jsonify({"message": "Task added to meeting"}), 201
+        return jsonify({"message": "Task added to meeting", "stage_at_meeting": task['stage']}), 201
     else:
         return jsonify({"error": "Cannot add tasks to a completed meeting"}), 400
-
     
 @app.route('/meetings/<int:meeting_id>/complete', methods=['PUT'])
 def complete_meeting(meeting_id):
@@ -310,8 +320,9 @@ def generate_report(meeting_id):
     
     meeting = meeting_response.data[0]
     
-    tasks_response = supabase.table('meeting_tasks').select('tasks(*)').eq('meeting_id', meeting_id).execute()
-    tasks = [item['tasks'] for item in tasks_response.data]
+    # Update this query to include stage_at_meeting
+    tasks_response = supabase.table('meeting_tasks').select('tasks(*), stage_at_meeting').eq('meeting_id', meeting_id).execute()
+    tasks = tasks_response.data
 
     document = Document()
     
@@ -367,7 +378,7 @@ def generate_report(meeting_id):
 
     document.add_paragraph("Agenda", style='Heading 1')
     for index, task in enumerate(tasks, start=1):
-        document.add_paragraph(f"{task['casenumber']} {task['title']} page {index}")
+        document.add_paragraph(f"{task['tasks']['casenumber']} {task['tasks']['title']} page {index}")
 
     for task in tasks:
         document.add_page_break()
@@ -375,15 +386,16 @@ def generate_report(meeting_id):
         document.add_paragraph("Proposal – New course idea", style='Heading 2')
         
         headings = [
-            ("Item number", task['casenumber']),
-            ("Idea title", task['title']),
-            ("Idea owner", task['owner']),
-            ("Briefly describe the idea", task['description']),
-            ("Why is this relevant for BI?", task.get('relevance_for_bi', '')),
-            ("Why does individuals and/or organizations need such a course/idea?", task.get('need_for_course', '')),
-            ("What would be the relevant target group?", task.get('target_group', '')),
-            ("What are your thoughts on the future growth potential of the market for this course/idea?", task.get('growth_potential', '')),
-            ("Faculty resources – which academic departments should be involved?", task.get('faculty_resources', ''))
+            ("Item number", task['tasks']['casenumber']),
+            ("Idea title", task['tasks']['title']),
+            ("Idea owner", task['tasks']['owner']),
+            ("Stage at meeting", task['stage_at_meeting']),  # Add this line
+            ("Briefly describe the idea", task['tasks']['description']),
+            ("Why is this relevant for BI?", task['tasks'].get('relevance_for_bi', '')),
+            ("Why does individuals and/or organizations need such a course/idea?", task['tasks'].get('need_for_course', '')),
+            ("What would be the relevant target group?", task['tasks'].get('target_group', '')),
+            ("What are your thoughts on the future growth potential of the market for this course/idea?", task['tasks'].get('growth_potential', '')),
+            ("Faculty resources – which academic departments should be involved?", task['tasks'].get('faculty_resources', ''))
         ]
 
         for heading, content in headings:
@@ -452,7 +464,7 @@ def generate_minutes(meeting_id):
     
     meeting = meeting_response.data[0]
     
-    tasks_response = supabase.table('meeting_tasks').select('tasks(*), minutes').eq('meeting_id', meeting_id).execute()
+    tasks_response = supabase.table('meeting_tasks').select('tasks(*), minutes, stage_at_meeting').eq('meeting_id', meeting_id).execute()
     tasks = tasks_response.data
 
     document = Document()
@@ -466,8 +478,10 @@ def generate_minutes(meeting_id):
     date_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     for task in tasks:
-        item_title = document.add_paragraph(f"{task['tasks']['number']} - {task['tasks']['title']}")
+        item_title = document.add_paragraph(f"{task['tasks']['casenumber']} - {task['tasks']['title']}")
         item_title.runs[0].bold = True
+        
+        document.add_paragraph(f"Stage at meeting: {task['stage_at_meeting']}")
         
         if task['minutes']:
             document.add_paragraph(task['minutes'])
@@ -560,6 +574,36 @@ def import_nettskjema():
     except Exception as e:
         logging.error(f"Error processing import: {str(e)}", exc_info=True)
         return jsonify({"error": f"Error processing import: {str(e)}"}), 500
+
+@app.route('/tasks/<int:task_id>/meetings', methods=['GET'])
+def get_task_meeting_history(task_id):
+    try:
+        # Query to get all meetings for this task, along with the stage at each meeting
+        response = supabase.table('meeting_tasks')\
+            .select('meetings(id, date, number), stage_at_meeting')\
+            .eq('task_id', task_id)\
+            .execute()
+        
+        if not response.data:
+            return jsonify([]), 200
+        
+        # Format the response data
+        meeting_history = []
+        for entry in response.data:
+            meeting_info = entry['meetings']
+            meeting_history.append({
+                'date': meeting_info['date'],
+                'number': meeting_info['number'],
+                'stage_at_meeting': entry['stage_at_meeting']
+            })
+        
+        # Sort the meeting history by date
+        meeting_history.sort(key=lambda x: x['date'])
+        
+        return jsonify(meeting_history), 200
+    except Exception as e:
+        print(f"Error fetching meeting history: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
