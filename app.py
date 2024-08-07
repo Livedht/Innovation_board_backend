@@ -37,18 +37,11 @@ NETTSKJEMA_CLIENT_ID = os.environ.get("NETTSKJEMA_CLIENT_ID")
 NETTSKJEMA_CLIENT_SECRET = os.environ.get("NETTSKJEMA_CLIENT_SECRET")
 NETTSKJEMA_FORM_ID = os.environ.get("NETTSKJEMA_FORM_ID")
 
-current_year = datetime.now().year
-current_meeting = 1
-
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, datetime):
             return o.isoformat()
         return super().default(o)
-
-def roman_numeral(num):
-    roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X']
-    return roman[num - 1] if num <= 10 else str(num)
 
 def get_oauth_session():
     client = BackendApplicationClient(client_id=NETTSKJEMA_CLIENT_ID)
@@ -79,7 +72,6 @@ def get_nettskjema_data(form_id):
                 logging.error(f"Problematic line: {line}")
     
     return list(submissions.values())
-
 
 def get_form_elements(form_id):
     oauth = get_oauth_session()
@@ -131,14 +123,10 @@ def transform_submission_to_task(submission, element_mapping):
     
     return task
 
-
-
 @app.route('/tasks', methods=['GET'])
 def get_tasks():
     response = supabase.table('tasks').select('*').execute()
     tasks = response.data
-    for index, task in enumerate(tasks, start=1):
-        task['caseNumber'] = f"{index:02d}/{str(current_year)[2:]} - {roman_numeral(current_meeting)}"
     return jsonify(tasks)
 
 @app.route('/tasks', methods=['POST'])
@@ -177,34 +165,15 @@ def delete_task(task_id):
     supabase.table('tasks').delete().eq('id', task_id).execute()
     return '', 204
 
-@app.route('/tasks/reorder', methods=['POST'])
-def reorder_tasks():
-    new_order = request.json
-    tasks = supabase.table('tasks').select('*').execute().data
-    task_dict = {task['id']: task for task in tasks}
-    
-    reordered_tasks = []
-    for task_id in new_order:
-        if task_id in task_dict:
-            reordered_tasks.append(task_dict[task_id])
-    
-    for task in tasks:
-        if task['id'] not in new_order:
-            reordered_tasks.append(task)
-    
-    for index, task in enumerate(reordered_tasks, start=1):
-        task['caseNumber'] = f"{index:02d}/{str(current_year)[2:]} - {roman_numeral(current_meeting)}"
-        supabase.table('tasks').update({'caseNumber': task['caseNumber']}).eq('id', task['id']).execute()
-    
-    return jsonify(reordered_tasks)
-
 @app.route('/meetings', methods=['GET'])
 def get_meetings():
-    response = supabase.table('meetings').select('*, tasks(*)').execute()
+    response = supabase.table('meetings').select('*, meeting_tasks(task_id, tasks(*))').execute()
     meetings = response.data
     for meeting in meetings:
-        meeting['tasks'] = meeting.get('tasks', [])
+        meeting['tasks'] = [item['tasks'] for item in meeting.get('meeting_tasks', [])]
+        del meeting['meeting_tasks']
     return jsonify(meetings), 200
+
 
 @app.route('/meetings', methods=['POST'])
 def add_meeting():
@@ -261,12 +230,65 @@ def delete_meeting(meeting_id):
 
 @app.route('/meetings/<int:meeting_id>/tasks', methods=['POST'])
 def add_task_to_meeting(meeting_id):
-    task_id = request.json['task_id']
-    response = supabase.table('meeting_tasks').insert({
-        'meeting_id': meeting_id,
-        'task_id': task_id
-    }).execute()
-    return jsonify(response.data[0])
+    data = request.json
+    task_id = data['task_id']
+    
+    # Fetch the meeting
+    meeting_response = supabase.table('meetings').select('*').eq('id', meeting_id).execute()
+    if not meeting_response.data:
+        return jsonify({"error": "Meeting not found"}), 404
+    meeting = meeting_response.data[0]
+    
+    # Fetch the task
+    task_response = supabase.table('tasks').select('*').eq('id', task_id).execute()
+    if not task_response.data:
+        return jsonify({"error": "Task not found"}), 404
+    task = task_response.data[0]
+    
+    if not meeting.get('is_completed', False):
+        # Get the current number of tasks in the meeting
+        current_tasks_response = supabase.table('meeting_tasks').select('task_id').eq('meeting_id', meeting_id).execute()
+        new_order = len(current_tasks_response.data) + 1
+        
+        # Add the task to the meeting
+        meeting_task_data = {
+            'meeting_id': meeting_id,
+            'task_id': task_id,
+            'task_order': new_order
+        }
+        supabase.table('meeting_tasks').insert(meeting_task_data).execute()
+        
+        return jsonify({"message": "Task added to meeting"}), 201
+    else:
+        return jsonify({"error": "Cannot add tasks to a completed meeting"}), 400
+
+    
+@app.route('/meetings/<int:meeting_id>/complete', methods=['PUT'])
+def complete_meeting(meeting_id):
+    response = supabase.table('meetings').update({'is_completed': True}).eq('id', meeting_id).execute()
+    if response.data:
+        return jsonify({"message": "Meeting marked as completed"}), 200
+    else:
+        return jsonify({"error": "Meeting not found"}), 404
+
+@app.route('/meetings/<int:meeting_id>/reorder', methods=['PUT'])
+def reorder_meeting_tasks(meeting_id):
+    data = request.json
+    new_order = data['new_order']  # List of task IDs in the new order
+    
+    meeting_response = supabase.table('meetings').select('*').eq('id', meeting_id).execute()
+    if not meeting_response.data:
+        return jsonify({"error": "Meeting not found"}), 404
+    meeting = meeting_response.data[0]
+    
+    if not meeting.get('is_completed', False):
+        for index, task_id in enumerate(new_order, start=1):
+            # Update the order in meeting_tasks
+            supabase.table('meeting_tasks').update({'order': index}).eq('meeting_id', meeting_id).eq('task_id', task_id).execute()
+        
+        return jsonify({"message": "Tasks reordered successfully"}), 200
+    else:
+        return jsonify({"error": "Cannot reorder tasks in a completed meeting"}), 400
 
 @app.route('/meetings/<int:meeting_id>/tasks/<int:task_id>', methods=['DELETE'])
 def remove_task_from_meeting(meeting_id, task_id):
@@ -326,7 +348,7 @@ def generate_report(meeting_id):
         ("Tonje Omland", "Manager Programme administration - Executive"),
         ("Jørgen Bjørnson Aanderaa", "Director Learning Center"),
         ("Line Lervik-Olsen", "Head of Department, Marketing"),
-        ("John Christian Langli", "Head of Department, Accounting and Operations Management")
+        ("Eivind Furseth", "Head of Department, Accounting and Operations Management")
     ]
     
     document.add_paragraph("Members", style='Heading 1')
@@ -345,7 +367,7 @@ def generate_report(meeting_id):
 
     document.add_paragraph("Agenda", style='Heading 1')
     for index, task in enumerate(tasks, start=1):
-        document.add_paragraph(f"{task['caseNumber']} {task['title']} page {index}")
+        document.add_paragraph(f"{task['casenumber']} {task['title']} page {index}")
 
     for task in tasks:
         document.add_page_break()
@@ -353,7 +375,7 @@ def generate_report(meeting_id):
         document.add_paragraph("Proposal – New course idea", style='Heading 2')
         
         headings = [
-            ("Item number", task['caseNumber']),
+            ("Item number", task['casenumber']),
             ("Idea title", task['title']),
             ("Idea owner", task['owner']),
             ("Briefly describe the idea", task['description']),
@@ -444,7 +466,7 @@ def generate_minutes(meeting_id):
     date_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     for task in tasks:
-        item_title = document.add_paragraph(f"{task['tasks']['caseNumber']} - {task['tasks']['title']}")
+        item_title = document.add_paragraph(f"{task['tasks']['number']} - {task['tasks']['title']}")
         item_title.runs[0].bold = True
         
         if task['minutes']:
@@ -538,36 +560,6 @@ def import_nettskjema():
     except Exception as e:
         logging.error(f"Error processing import: {str(e)}", exc_info=True)
         return jsonify({"error": f"Error processing import: {str(e)}"}), 500
-
-@app.route('/me', methods=['GET'])
-def get_environment():
-    # This endpoint might need to be adjusted based on how you're handling user authentication with Supabase
-    return jsonify({"message": "User environment information"}), 200
-
-@app.route('/form/<int:form_id>/submission-metadata', methods=['GET'])
-def get_all_metadata_answers(form_id):
-    response = supabase.table('submissions').select('*').eq('form_id', form_id).execute()
-    return jsonify(response.data)
-
-@app.route('/form/<int:form_id>/submission-metadata-postponed', methods=['GET'])
-def get_all_postponed_metadata_answers(form_id):
-    response = supabase.table('submissions').select('*').eq('form_id', form_id).eq('postponed', True).execute()
-    return jsonify(response.data)
-
-@app.route('/form/<int:form_id>/spss-syntax', methods=['GET'])
-def get_spss_syntax_file(form_id):
-    # Implement SPSS syntax file generation logic here
-    return jsonify({"message": "SPSS syntax file generation not implemented"}), 501
-
-@app.route('/form/<int:form_id>/excel-report', methods=['GET'])
-def get_excel_report(form_id):
-    # Implement Excel report generation logic here
-    return jsonify({"message": "Excel report generation not implemented"}), 501
-
-@app.route('/form/<int:form_id>/csv-report', methods=['GET'])
-def get_csv_report(form_id):
-    # Implement CSV report generation logic here
-    return jsonify({"message": "CSV report generation not implemented"}), 501
 
 @app.errorhandler(404)
 def not_found(error):
